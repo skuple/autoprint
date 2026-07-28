@@ -1,39 +1,83 @@
 # ==============================================================================
 # WIN 11 FILTER, AUTOPRINT & ARCHIVE PIPELINE
-# EXPERIMENTAL BRANCH V1.2.1-AUDITTEST: SPREADSHEET SUPPORT & STARTUP AUDIT
+# EXPERIMENTAL BRANCH V1.2.1: DYNAMIC PATHS, X64/X86 ARCHITECTURE & STARTUP AUDIT
+# REPOSITORY: https://github.com/skuple/autoprint
 # ==============================================================================
 
 [CmdletBinding()]
 param (
     [switch]$Headless,
-    [switch]$Stop
+    [switch]$Stop,
+    [string]$WatchFolder = ""
 )
 
 # ------------------------------------------------------------------------------
-# 1. PIPELINE CONFIGURATION & PATHS
+# DYNAMIC EXECUTABLE PATH RESOLVER (SYSTEM PATH, REGISTRY, X64/X86 FALLBACKS)
 # ------------------------------------------------------------------------------
-$folderToWatch   = "C:\Users\Administrator\Downloads\LocalSend"
-$logFile          = "C:\Users\Administrator\Downloads\LocalSend\watcher_log.txt"
-$jobName          = "WindowsFolderWatcherJob"
-$configFile       = "C:\Users\Administrator\Downloads\LocalSend\watcher_config.json"
-$sumatraPath      = "C:\Users\Administrator\AppData\Local\SumatraPDF\SumatraPDF.exe"
-$libreOfficePath  = "C:\Program Files\LibreOffice\program\soffice.exe"
+function Resolve-ExecutablePath ([string]$exeName, [array]$fallbackPaths) {
+    # 1. Check System PATH Environment
+    $cmd = Get-Command $exeName -ErrorAction SilentlyContinue
+    if ($cmd -and (Test-Path $cmd.Source)) { return $cmd.Source }
 
-# Fallback if LibreOffice is installed in 32-bit directory
-if (-not (Test-Path $libreOfficePath)) {
-    $libreOfficePath = "C:\Program Files (x86)\LibreOffice\program\soffice.exe"
+    # 2. Check Windows Registry App Paths (64-bit and 32-bit WOW64 Nodes)
+    $regKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$exeName",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\$exeName"
+    )
+    foreach ($key in $regKeys) {
+        if (Test-Path $key) {
+            $regPath = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).'(default)'
+            if ($regPath -and (Test-Path $regPath)) { return $regPath }
+        }
+    }
+
+    # 3. Check Known Architecture Directory Paths
+    foreach ($path in $fallbackPaths) {
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path $path)) { return $path }
+    }
+
+    return $null
 }
+
+# ------------------------------------------------------------------------------
+# 1. DYNAMIC CONFIGURATION & PATH RESOLUTION
+# ------------------------------------------------------------------------------
+# Resolve Active Watch Folder (Parameter -> Active Profile -> Fallback)
+if ([string]::IsNullOrWhiteSpace($WatchFolder)) {
+    $folderToWatch = Join-Path $env:USERPROFILE "Downloads\LocalSend"
+} else {
+    $folderToWatch = $WatchFolder
+}
+
+$logFile    = Join-Path $folderToWatch "watcher_log.txt"
+$configFile = Join-Path $folderToWatch "watcher_config.json"
+$jobName    = "WindowsFolderWatcherJob"
+
+# Resolve LibreOffice (x64 / x86 / Registry)
+$libreOfficePath = Resolve-ExecutablePath -exeName "soffice.exe" -fallbackPaths @(
+    "C:\Program Files\LibreOffice\program\soffice.exe",
+    "C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    "$env:ProgramFiles\LibreOffice\program\soffice.exe",
+    "${env:ProgramFiles(x86)}\LibreOffice\program\soffice.exe"
+)
+
+# Resolve SumatraPDF (x64 / x86 / AppData / Registry)
+$sumatraPath = Resolve-ExecutablePath -exeName "SumatraPDF.exe" -fallbackPaths @(
+    "$env:LOCALAPPDATA\SumatraPDF\SumatraPDF.exe",
+    "C:\Program Files\SumatraPDF\SumatraPDF.exe",
+    "C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe",
+    "$env:ProgramFiles\SumatraPDF\SumatraPDF.exe",
+    "${env:ProgramFiles(x86)}\SumatraPDF\SumatraPDF.exe"
+)
 
 # --- FEATURE: INSTANT PROCESS TERMINATION (-Stop) ---
 if ($Stop) {
     Write-Host "Stopping all running watcher processes..." -ForegroundColor Yellow
     
-    # Stop background jobs
     Get-Job -Name $jobName -ErrorAction SilentlyContinue | Stop-Job -ErrorAction SilentlyContinue
     Get-Job -Name $jobName -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
     
-    # Kill any orphaned headless process handles
-    (Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%Stable_V1_DynLibre.ps1%' OR CommandLine LIKE '%automaticPrintScript.ps1%'").ProcessId | 
+    (Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%Stable_V1.2.1.ps1%' OR CommandLine LIKE '%Stable_V1_DynLibre.ps1%'").ProcessId | 
         Where-Object { $_ -ne $PID } | 
         Stop-Process -Force -ErrorAction SilentlyContinue
 
@@ -41,7 +85,7 @@ if ($Stop) {
     exit
 }
 
-# Pre-run Memory Cleanup: Terminate lingering background jobs
+# Pre-run Memory Cleanup
 $lingeringJobs = Get-Job -Name $jobName -ErrorAction SilentlyContinue
 if ($lingeringJobs) {
     Stop-Job -Name $jobName -ErrorAction SilentlyContinue
@@ -110,7 +154,8 @@ function Start-Watcher {
         }
     }
 
-    Write-Host "Starting enterprise folder gatekeeper (v1.2.1-AuditTest)..." -ForegroundColor Cyan
+    Write-Host "Starting enterprise folder gatekeeper (v1.2.1)..." -ForegroundColor Cyan
+    Write-Host "Monitoring Path: $folderToWatch" -ForegroundColor Gray
 
     $scriptBlock = {
         param($path, $log, $configPath, $sumatra, $libreOffice)
@@ -192,7 +237,6 @@ function Start-Watcher {
                 if ($pdfDoc -and $pdfDoc.PageCount) { return $pdfDoc.PageCount }
             } catch {}
 
-            # Fast Regex Fallback for standard PDF page objects
             try {
                 $stream = [System.IO.File]::OpenRead($filePath)
                 $reader = New-Object System.IO.StreamReader($stream)
@@ -203,7 +247,7 @@ function Start-Watcher {
                 if ($matches.Count -gt 0) { return $matches.Count }
             } catch {}
 
-            return 1 # Fallback to 1 page if undetected
+            return 1
         }
 
         # --- PRINTER HEALTH SENSOR ---
@@ -239,7 +283,7 @@ function Start-Watcher {
         # --- LIBREOFFICE DOC/DOCX/XLS/XLSX CONVERTER (PID ISOLATED) ---
         function Convert-DocToPdf ($docPath, $outputFolder, $soPath) {
             try {
-                if (-not (Test-Path $soPath)) { return $null }
+                if (-not $soPath -or -not (Test-Path $soPath)) { return $null }
                 
                 $pInfo = New-Object System.Diagnostics.ProcessStartInfo
                 $pInfo.FileName = $soPath
@@ -250,7 +294,7 @@ function Start-Watcher {
                 $proc = [System.Diagnostics.Process]::Start($pInfo)
                 if ($proc) {
                     $targetPid = $proc.Id
-                    $exited = $proc.WaitForExit(30000) # 30s process limit
+                    $exited = $proc.WaitForExit(30000) # 30s timeout guard
                     if (-not $exited) {
                         Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
                         return $null
@@ -382,7 +426,6 @@ function Start-Watcher {
                 $cfg = Get-Content -Path $configPath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
                 if (-not $cfg) { $cfg = @{ AutoPrint = $true; PollingIntervalSec = 1.5; LogMaxSizeMB = 2; MaxLogArchivesToKeep = 5; SelfHealingMinutes = 10; MaxSpoolWaitSec = 300 } }
 
-                # 1. Log Rotation Check
                 Invoke-LogRotation -logPath $log -targetFolder $path -maxSizeMB $cfg.LogMaxSizeMB -maxArchivesToKeep $cfg.MaxLogArchivesToKeep
 
                 $ignoredFolders = @("wrongFormat", "donePrint", "retryPrint")
@@ -398,7 +441,7 @@ function Start-Watcher {
                          } | 
                          Sort-Object CreationTime
 
-                # 2. Self-Healing retryPrint Scheduler
+                # Self-Healing Retry Scheduler
                 if (($items.Count -eq 0) -and ((Get-Date) -gt $lastRetryCheck.AddMinutes($cfg.SelfHealingMinutes))) {
                     $lastRetryCheck = Get-Date
                     if (Test-Path $retryPrintFolder) {
@@ -421,7 +464,7 @@ function Start-Watcher {
                     }
                 }
 
-                # 3. Main File Processing Loop
+                # Main File Processing Loop
                 foreach ($item in $items) {
                     $sw = [System.Diagnostics.Stopwatch]::StartNew()
                     $currentPath       = $item.FullName
@@ -452,7 +495,6 @@ function Start-Watcher {
                         $extension = [System.IO.Path]::GetExtension($cleanOriginalName).ToLower()
                         $allowedExtensions = @(".doc", ".docx", ".xls", ".xlsx", ".pdf")
 
-                        # Extension Check
                         if ($extension -notin $allowedExtensions) {
                             Move-ToFolder $currentPath $cleanOriginalName $wrongFormatFolder | Out-Null
                             Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) BLOCKED & MOVED TO wrongFormat: $cleanOriginalName"
@@ -462,10 +504,10 @@ function Start-Watcher {
 
                         $pdfToPrintPath = $currentPath
 
-                        # --- CONVERT OFFICE FILES (.DOC, .DOCX, .XLS, .XLSX) VIA LIBREOFFICE ---
+                        # --- CONVERT OFFICE FILES VIA LIBREOFFICE ---
                         if ($extension -in @(".doc", ".docx", ".xls", ".xlsx")) {
-                            if (-not (Test-Path $libreOffice)) {
-                                Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) CONVERSION FAILED: LibreOffice not found at '$libreOffice'"
+                            if (-not $libreOffice -or -not (Test-Path $libreOffice)) {
+                                Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) CONVERSION FAILED: LibreOffice not found on machine."
                                 Move-ToFolder $currentPath $cleanOriginalName $retryPrintFolder | Out-Null
                                 $sw.Stop()
                                 continue
@@ -481,7 +523,6 @@ function Start-Watcher {
                                 continue
                             }
 
-                            # Rename temp PDF to avoid collision
                             $tempPdfToClean = Join-Path $path "($([System.IO.Path]::GetFileNameWithoutExtension($cleanOriginalName)))_CONVERTED_TEMP.pdf"
                             Move-Item -Path $convertedPdf -Destination $tempPdfToClean -Force -ErrorAction SilentlyContinue
                             $pdfToPrintPath = $tempPdfToClean
@@ -499,33 +540,22 @@ function Start-Watcher {
                         }
                         Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) PRE-FLIGHT PASSED: PDF structure valid."
 
-                        Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) VALID FORMAT CONFIRMED: $cleanOriginalName"
-
-                        # --- DYNAMIC TIMEOUT & FILE METRICS ANALYSIS ---
+                        # --- DYNAMIC TIMEOUT ANALYSIS ---
                         $fileItem = Get-Item $pdfToPrintPath
                         $fileSizeMB = [math]::Round($fileItem.Length / 1MB, 2)
                         $pageCount = Get-PdfPageCount -filePath $pdfToPrintPath
 
-                        # Formula: Base 60s + 30s/page + 20s/MB
                         $dynamicTimeout = 60 + ($pageCount * 30) + [math]::Round($fileSizeMB * 20)
-
-                        # Enforce Safety Clamps: Floor 120s (2m), Ceiling 900s (15m)
                         if ($dynamicTimeout -lt 120) { $dynamicTimeout = 120 }
                         if ($dynamicTimeout -gt 900) { $dynamicTimeout = 900 }
 
                         $maxSpoolWait = $dynamicTimeout
                         Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) METRICS ANALYZED: $pageCount Page(s) | ${fileSizeMB} MB | Calculated Dynamic Timeout: ${maxSpoolWait}s"
 
-                        # --- STATE TAGGING ---
                         $currentPath = Update-FileState $currentPath $cleanOriginalName "_PROCESSING"
-
-                        # --- REFRESH PATH FOR NATIVE PDFs AFTER STATE TAGGING ---
-                        if ($extension -eq ".pdf") {
-                            $pdfToPrintPath = $currentPath
-                        }
+                        if ($extension -eq ".pdf") { $pdfToPrintPath = $currentPath }
 
                         if ($cfg.AutoPrint -eq $true) {
-                            
                             $health = Get-PrinterHealthStatus
                             if (-not $health.PrinterName) {
                                 Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) PRINT FAILED: No default printer configured."
@@ -535,24 +565,18 @@ function Start-Watcher {
                                 continue
                             }
 
-                            # Purge Error Print Jobs
                             try {
                                 Get-PrintJob -PrinterName $health.PrinterName -ErrorAction SilentlyContinue | 
                                     Where-Object { $_.JobStatus -like "*Error*" -or $_.JobStatus -like "*UserAction*" } | 
                                     Remove-PrintJob -ErrorAction SilentlyContinue
                             } catch {}
 
-                            # Pre-Print Readiness Retry
                             $printerReady = $false
                             $pRetry = 0
                             while (-not $printerReady -and $pRetry -lt 3) {
                                 $health = Get-PrinterHealthStatus
-                                if ($health.IsReady) {
-                                    $printerReady = $true
-                                } else {
-                                    $pRetry++
-                                    Start-Sleep -Seconds 2
-                                }
+                                if ($health.IsReady) { $printerReady = $true } 
+                                else { $pRetry++; Start-Sleep -Seconds 2 }
                             }
 
                             if (-not $printerReady) {
@@ -563,8 +587,8 @@ function Start-Watcher {
                                 continue
                             }
 
-                            # Process-Isolated Print Spooling via SumatraPDF
-                            if (Test-Path $sumatra) {
+                            # Dispatch Print via SumatraPDF
+                            if ($sumatra -and (Test-Path $sumatra)) {
                                 Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) DISPATCHING: Sending PDF to SumatraPDF..."
 
                                 $pInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -581,18 +605,16 @@ function Start-Watcher {
                                 Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) SPOOLED TO HARDWARE: Sent to '$($health.PrinterName)'"
                             } else {
                                 Start-Process -FilePath $pdfToPrintPath -Verb Print -WindowStyle Hidden -ErrorAction SilentlyContinue
-                                Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) SPOOLED TO HARDWARE: Sent via shell"
+                                Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) SPOOLED TO HARDWARE: Sent via shell fallback"
                             }
 
-                            # --- REAL-TIME SPOOLER MONITOR & TIMER FREEZE ENGINE ---
+                            # Real-Time Spooler & Timer Freeze Loop
                             Start-Sleep -Seconds 2
                             $spoolTimer       = 0
                             $faultTimer       = 0
-                            $maxFaultWait     = 600 # 10 Minutes Human Intervention Cap
+                            $maxFaultWait     = 600
                             $printSuccess     = $false
                             $lastLoggedState  = "NORMAL"
-
-                            # Dedicated Physical Print Duration Stopwatch
                             $physicalSw = [System.Diagnostics.Stopwatch]::StartNew()
 
                             while ($spoolTimer -lt $maxSpoolWait) {
@@ -602,44 +624,40 @@ function Start-Watcher {
                                 $hCheck = Get-PrinterHealthStatus
                                 $currentState = $hCheck.StateText
 
-                                # State Change & Logging
                                 if ($currentState -ne $lastLoggedState) {
                                     if ($currentState -eq "PAPER_OUT") {
                                         $currentPath = Update-FileState $currentPath $cleanOriginalName "_WAITING_PAPER"
-                                        Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE ALERT: Paper Out detected (Dynamic Timeout Clock Frozen)."
+                                        Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE ALERT: Paper Out detected (Timeout Clock Frozen)."
                                     } elseif ($currentState -eq "PAPER_JAM") {
                                         $currentPath = Update-FileState $currentPath $cleanOriginalName "_PAPER_JAMMED"
-                                        Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE ALERT: Paper Jam detected (Dynamic Timeout Clock Frozen)."
+                                        Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE ALERT: Paper Jam detected (Timeout Clock Frozen)."
                                     } elseif ($currentState -eq "HARDWARE_FAULT") {
                                         if ($jobCount -gt 0) {
-                                            Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) PRINTER BUSY: Physically printing in progress..."
+                                            Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) PRINTER BUSY: Physically printing..."
                                         } else {
                                             $currentPath = Update-FileState $currentPath $cleanOriginalName "_HARDWARE_ERROR"
                                             Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE ALERT: General printer fault."
                                         }
                                     } elseif ($currentState -eq "NORMAL") {
-                                        Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE RECOVERED: Printer state cleared (Dynamic Timeout Clock Resumed)."
+                                        Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE RECOVERED: Printer state cleared (Timeout Clock Resumed)."
                                     }
                                     $lastLoggedState = $currentState
                                 }
 
-                                # Physical Print Queue Check
                                 if ($jobCount -eq 0) {
                                     $physicalSw.Stop()
                                     $physDurationText = "{0:N2}" -f $physicalSw.Elapsed.TotalSeconds
-                                    Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE PRINT COMPLETE: Spooler queue clear (PHYSICAL PRINT TIME: ${physDurationText}s)"
+                                    Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HARDWARE PRINT COMPLETE: Queue clear (PHYSICAL PRINT TIME: ${physDurationText}s)"
                                     $printSuccess = $true
                                     break
                                 } else {
                                     Start-Sleep -Seconds 3
-                                    
-                                    # TIMER FREEZE LOGIC:
                                     $isFaultActive = ($currentState -in @("PAPER_OUT", "PAPER_JAM")) -or ($currentState -eq "HARDWARE_FAULT" -and $jobCount -eq 0)
 
                                     if ($isFaultActive) {
                                         $faultTimer += 3
                                         if ($faultTimer -ge $maxFaultWait) {
-                                            Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HUMAN INTERVENTION TIMEOUT (${maxFaultWait}s): Unresolved hardware error ($currentState)."
+                                            Add-Content -Path $log -Value "[ $timeStamp ] $(Get-ElapsedText $sw) HUMAN INTERVENTION TIMEOUT (${maxFaultWait}s): Unresolved error ($currentState)."
                                             break
                                         }
                                     } else {
@@ -649,7 +667,6 @@ function Start-Watcher {
                                 }
                             }
 
-                            # Cleanup temporary converted PDF file
                             if ($tempPdfToClean -and (Test-Path $tempPdfToClean)) {
                                 Remove-Item -Path $tempPdfToClean -Force -ErrorAction SilentlyContinue
                             }
@@ -680,7 +697,6 @@ function Start-Watcher {
                 }
             } catch {}
 
-            # GARBAGE COLLECTION SWEEP
             [System.GC]::Collect()
             [System.GC]::WaitForPendingFinalizers()
 
@@ -729,7 +745,7 @@ while ($true) {
     Write-Host " Auto-Print Mode:        " -NoNewline
     Write-Host "[ $(if($currentConfig.AutoPrint){'ON'}else{'OFF'}) ]" -ForegroundColor $printStatusColor
     Write-Host " Pipeline Version:       " -NoNewline
-    Write-Host "[ v1.2.1-AuditTest ]" -ForegroundColor Yellow
+    Write-Host "[ v1.2.1 ]" -ForegroundColor Yellow
     Write-Host " Target Active Printer:  $currentPrinter" -ForegroundColor Yellow
     Write-Host " Target Folder Path:     $folderToWatch" -ForegroundColor Gray
     Write-Host "==================================================" -ForegroundColor DarkGray
